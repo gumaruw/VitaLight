@@ -30,3 +30,5 @@ dist/
 # Large datasets - ignore UBFC dataset
 ubfc_2/
 ubfc_2/*
+screenshots/
+screenshots/*
