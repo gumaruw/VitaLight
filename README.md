@@ -4,16 +4,16 @@ A system that detects heart rate from facial video using subtle color changes in
 
 ---
 
-# Heart Rate Estimation Flowchart
+# VitaLight Flowchart
 
 ```mermaid
 flowchart TD
-A[Video Input] --> B[Face Detection<br>(OpenCV / MediaPipe)]
-B --> C[ROI Selection<br>(Forehead, Cheeks)]
-C --> D[Signal Extraction<br>(RGB Time Series)]
-D --> E[Signal Processing<br>(Filtering, Detrending)]
-E --> F[Heart Rate Estimation<br>(FFT, Peaks, Autocorrelation)]
-F --> G[Output: Heart Rate (BPM) + Visualization]
+    A[Video Input] --> B[Face Detection - OpenCV / MediaPipe]
+    B --> C[ROI Selection - Forehead, Cheeks]
+    C --> D[Signal Extraction - RGB Time Series]
+    D --> E[Signal Processing - Filtering, Detrending]
+    E --> F[Heart Rate Estimation - FFT, Peaks, Autocorrelation]
+    F --> G[Output: Heart Rate BPM + Visualization]
 ```
 
 ---
