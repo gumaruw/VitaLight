@@ -1,5 +1,6 @@
 # VitaLight - rPPG Heart Rate Detection
 
+# import necessary libraries
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
@@ -12,13 +13,11 @@ from pathlib import Path
 import glob
 
 class rPPGProcessor:
-    
+
+    # Initialize the rPPG processor
     def __init__(self, fps=30):
-        """
-        Initialize the rPPG processor
-        """
         self.fps = fps
-        # Initialize face detector
+        # Initialize face detector (haar cascade)
         self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
         
         # Heart rate frequency range in Hz (50-180 BPM -> 0.83-3.0 Hz)
@@ -26,35 +25,33 @@ class rPPGProcessor:
         self.hr_freq_max = 3.0   # 180 BPM
         
         # Storage for extracted signals
-        self.rgb_signals = []
-        self.timestamps = []
-        self.face_locations = []  # Face tracking için
+        self.rgb_signals = [] # color change signals from face
+        self.timestamps = [] # time values for each frame
+        self.face_locations = []  # Face tracking
 
         print("rPPGProcessor initialized successfully")
 
+    # face detection with multiple ROIs
     def detect_face_roi(self, frame):
-        """
-        face detection with multiple ROIs
-        """
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
         # Detect faces
         faces = self.face_cascade.detectMultiScale(
             gray, 
-            scaleFactor=1.05,  # Daha hassas
-            minNeighbors=8,    # Daha stabil
-            minSize=(120, 120) # Daha büyük minimum boyut
+            scaleFactor=1.05,  # more sensitive face detection
+            minNeighbors=8,    # more stable 
+            minSize=(120, 120) # larger minimum size (don't detect tiny faces)
         )
         
         if len(faces) == 0:
-            return None, None, None
+            return None, None, None # no face detected
             
         # Take the largest face
         face = max(faces, key=lambda rect: rect[2] * rect[3])
         x, y, w, h = face
         
         # Multiple ROIs - forehead, left cheek, right cheek
-        rois = {}
+        rois = {} # dictionary to hold ROIs
         
         # Forehead ROI
         forehead_x = x + w // 4
@@ -83,14 +80,12 @@ class rPPGProcessor:
             'right_cheek': (right_cheek_x, right_cheek_y, right_cheek_w, right_cheek_h)
         }
     
+    # extract RGB signals from ROIs with quality checks
     def extract_rgb_signal(self, rois):
-        """
-        RGB signal extraction with quality assessment
-        """
         if not rois or len(rois) == 0:
-            return None
+            return None # no ROIs
             
-        signals = {}
+        signals = {} # dictionary to hold rgb values
         
         for roi_name, roi in rois.items():
             if roi is None or roi.size == 0:
@@ -107,7 +102,7 @@ class rPPGProcessor:
             if 30 < brightness < 220:  # Good brightness range
                 signals[roi_name] = rgb_values
         
-        # Combine signals (weighted average, forehead gets more weight)
+        # Combine signals (weighted average, forehead gets more weight cuz it's more stable)
         if 'forehead' in signals:
             final_signal = signals['forehead']
             weight_sum = 1.0
@@ -125,12 +120,13 @@ class rPPGProcessor:
             final_signal = [val/weight_sum for val in final_signal]
             return final_signal
         
-        # Fallback to any available signal
+        # Fallback to any available signal (if forehead missing)
         elif signals:
             return list(signals.values())[0]
         
         return None
     
+    # main video processing loop
     def process_video(self, video_path):
         cap = cv2.VideoCapture(video_path)
         
@@ -149,6 +145,7 @@ class rPPGProcessor:
         
         print(f"Processing video: {video_path}")
         
+        # read video frame by frame
         while True:
             ret, frame = cap.read()
             if not ret:
@@ -174,6 +171,7 @@ class rPPGProcessor:
             else:
                 consecutive_failures += 1
             
+            # i'll change this when we go live with real-time processing
             # Stop if too many consecutive failures (lost face)
             if consecutive_failures > 30:  # 1 second at 30 FPS
                 print(f"Warning: Lost face tracking at frame {frame_count}")
@@ -193,46 +191,52 @@ class rPPGProcessor:
         
         return len(self.rgb_signals) > 0
     
+    # basic preprocessing: detrend and normalize
     def preprocess_signal(self, signal_data):
-        """
-        Advanced signal preprocessing
-        Gelişmiş sinyal ön işleme
-        """
+        print(f"DEBUG: Preprocessing signal of length {len(signal_data)}")
         if len(signal_data) < self.fps * 2:  # Need at least 2 seconds
             return None
         
-        # Convert to numpy array
-        signal_array = np.array(signal_data)
+        try:
+            # Convert list to numpy array
+            signal_array = np.array(signal_data)
+            
+            # Detrend to remove slow variations (for slow changes like light and brightness)
+            detrended = detrend(signal_array, type='linear')
+            
+            # Normalize to zero mean, unit variance (this way i only keep relative changes -heartbeat)
+            signal_std = np.std(detrended)
+            if signal_std < 1e-8:
+                print("DEBUG: Signal has zero variance, returning None")
+                return None
+                
+            normalized = (detrended - np.mean(detrended)) / signal_std
+            return normalized
         
-        # Detrend to remove slow variations
-        detrended = detrend(signal_array, type='linear')
-        
-        # Normalize to zero mean, unit variance
-        normalized = (detrended - np.mean(detrended)) / (np.std(detrended) + 1e-8)
-        
-        return normalized
+        except Exception as e:
+            print(f"DEBUG ERROR in preprocess_signal: {e}")
+            traceback.print_exc()
+            return None
     
+    # advanced filtering with bandpass and smoothing
     def advanced_filter_signal(self, signal_data):
-        """
-        Advanced filtering with multiple stages
-        Çok aşamalı gelişmiş filtreleme
-        """
+
         # Preprocessing
         processed_signal = self.preprocess_signal(signal_data)
         if processed_signal is None:
             return None
         
-        # Design butterworth bandpass filter
+        # bandpass filter design
         nyquist = 0.5 * self.fps
         low = self.hr_freq_min / nyquist
         high = self.hr_freq_max / nyquist
         
-        # Ensure filter coefficients are in valid range
+        # Ensure filter coefficients are in valid range (0,1)
         low = max(0.01, min(low, 0.99))
         high = max(low + 0.01, min(high, 0.99))
         
         try:
-            # Bandpass filter
+            # butterworth bandpass filter
             b, a = butter(4, [low, high], btype='band')
             filtered_signal = filtfilt(b, a, processed_signal)
             
@@ -240,12 +244,13 @@ class rPPGProcessor:
             b_smooth, a_smooth = butter(2, 0.1, btype='low')
             smoothed = filtfilt(b_smooth, a_smooth, filtered_signal)
             
-            return filtered_signal  # Return the bandpass filtered version
+            return smoothed  # Return the smoothed version
             
         except Exception as e:
             print(f"Filtering error: {e}")
             return processed_signal
     
+    # heart rate estimation using fft, peaks, autocorr
     def heart_rate_estimation(self, rgb_channel='G'):
         if len(self.rgb_signals) < self.fps * 3:  # Need at least 3 seconds
             return None, 0, {}
@@ -278,7 +283,7 @@ class rPPGProcessor:
             'autocorr': (autocorr_hr, autocorr_confidence)
         }
         
-        # Filter out invalid estimates
+        # Filter out invalid or low confidence estimates
         valid_methods = {k: v for k, v in methods.items() if v[0] is not None and v[1] > 0.1}
         
         if not valid_methods:
@@ -286,18 +291,18 @@ class rPPGProcessor:
         
         # Weighted average based on confidence
         total_weight = sum(conf for _, conf in valid_methods.values())
-        weighted_hr = sum(hr * conf for hr, conf in valid_methods.values()) / total_weight
+        weighted_hr = sum(hr * conf for hr, conf in valid_methods.values()) / total_weight # bpm
         avg_confidence = total_weight / len(valid_methods)
         
         return weighted_hr, avg_confidence, methods
     
+    # fft-based heart-rate estimation
     def fft_heart_rate_estimation(self, signal_data):
-        """FFT-based heart rate estimation"""
         try:
             # Perform FFT
             n_samples = len(signal_data)
             fft_values = fft(signal_data)
-            frequencies = fftfreq(n_samples, 1/self.fps)
+            frequencies = fftfreq(n_samples, 1/self.fps) # her FFT katsayısının frekans karşılığı
             
             # Keep only positive frequencies in HR range
             pos_mask = (frequencies > self.hr_freq_min) & (frequencies < self.hr_freq_max)
@@ -318,15 +323,18 @@ class rPPGProcessor:
             confidence = peak_power / total_power if total_power > 0 else 0
             
             return heart_rate, confidence
+            # heart rate= bpm, confidence= 0-1
         except Exception as e:
             print(f"FFT estimation error: {e}")
             return None, 0
     
+    # Peak-based heart rate estimation
     def peak_heart_rate_estimation(self, signal_data):
-        """Peak-based heart rate estimation"""
+        
         try:
             # Find peaks in signal
-            # Adaptive threshold based on signal properties
+            # Adaptive threshold based on signal properties 
+            # çok küçük dalgalalanmaları göz ardı etmek için sinyalin standart sapmasına göre ayarlıyoruz
             threshold = np.std(signal_data) * 0.3
             min_distance = int(self.fps * 60 / 200)  # Minimum distance between peaks (200 BPM max)
             
@@ -338,9 +346,9 @@ class rPPGProcessor:
             # Calculate intervals between peaks
             peak_intervals = np.diff(peaks) / self.fps  # Convert to seconds
             
-            # Filter out outliers (use median-based filtering)
+            # Medyana göre çok sapmış interval değerlerini çıkar
             median_interval = np.median(peak_intervals)
-            mad = np.median(np.abs(peak_intervals - median_interval))  # Median Absolute Deviation
+            mad = np.median(np.abs(peak_intervals - median_interval))  # Median Absolute Deviation - MAD
             
             # Keep intervals within 3*MAD of median
             valid_intervals = peak_intervals[np.abs(peak_intervals - median_interval) < 3 * mad]
@@ -361,8 +369,8 @@ class rPPGProcessor:
             print(f"Peak estimation error: {e}")
             return None, 0
     
+    # Autocorrelation-based heart rate estimation
     def autocorr_heart_rate_estimation(self, signal_data):
-        """Autocorrelation-based heart rate estimation"""
         try:
             # Calculate autocorrelation
             autocorr = np.correlate(signal_data, signal_data, mode='full')
@@ -381,7 +389,7 @@ class rPPGProcessor:
                 return None, 0
             
             peak_lag = np.argmax(search_range) + min_lag
-            heart_rate = 60 * self.fps / peak_lag
+            heart_rate = 60 * self.fps / peak_lag # convert peak lag to BPM
             
             # Confidence based on peak prominence
             peak_value = autocorr[peak_lag]
@@ -394,117 +402,145 @@ class rPPGProcessor:
             print(f"Autocorr estimation error: {e}")
             return None, 0
     
+    # Detailed visualization with all analysis steps
     def visualize_results_detailed(self):
-        """
-        Detailed visualization with all analysis steps
-        """
         if len(self.rgb_signals) == 0:
             print("No signals to visualize")
             return
         
-        rgb_array = np.array(self.rgb_signals)
-        timestamps = np.array(self.timestamps)
-        
-        # Create comprehensive plot
-        fig, axes = plt.subplots(5, 1, figsize=(15, 20))
-        
-        # 1. Raw RGB signals
-        axes[0].plot(timestamps, rgb_array[:, 0], 'r-', label='Red', alpha=0.7)
-        axes[0].plot(timestamps, rgb_array[:, 1], 'g-', label='Green', alpha=0.7)
-        axes[0].plot(timestamps, rgb_array[:, 2], 'b-', label='Blue', alpha=0.7)
-        axes[0].set_title('Raw RGB Signals')
-        axes[0].set_xlabel('Time (seconds)')
-        axes[0].set_ylabel('Intensity')
-        axes[0].legend()
-        axes[0].grid(True, alpha=0.3)
+        try:
+            rgb_array = np.array(self.rgb_signals)
+            timestamps = np.array(self.timestamps)
+            
+            # Create comprehensive plot 
+            fig, axes = plt.subplots(5, 1, figsize=(15, 20))
+            
+            # 1. Raw RGB signals
+            axes[0].plot(timestamps, rgb_array[:, 0], 'r-', label='Red', alpha=0.7)
+            axes[0].plot(timestamps, rgb_array[:, 1], 'g-', label='Green', alpha=0.7)
+            axes[0].plot(timestamps, rgb_array[:, 2], 'b-', label='Blue', alpha=0.7)
+            axes[0].set_title('Raw RGB Signals')
+            axes[0].set_xlabel('Time (seconds)')
+            axes[0].set_ylabel('Intensity')
+            axes[0].legend()
+            axes[0].grid(True, alpha=0.3)
         
         # 2. Processed Green signal
-        green_signal = rgb_array[:, 1]
-        processed = self.preprocess_signal(green_signal)
-        if processed is not None:
-            axes[1].plot(timestamps, green_signal, 'g-', alpha=0.5, label='Raw Green')
-            # Adjust processed signal length to match timestamps
-            if len(processed) == len(timestamps):
-                axes[1].plot(timestamps, processed, 'darkgreen', linewidth=2, label='Preprocessed')
-        axes[1].set_title('Signal Preprocessing')
-        axes[1].set_xlabel('Time (seconds)')
-        axes[1].set_ylabel('Amplitude')
-        axes[1].legend()
-        axes[1].grid(True, alpha=0.3)
+            green_signal = rgb_array[:, 1]
+            processed = self.preprocess_signal(green_signal)
+            if processed is not None:
+                axes[1].plot(timestamps, green_signal, 'g-', alpha=0.5, label='Raw Green')
+                # Adjust processed signal length to match timestamps
+                if len(processed) == len(timestamps):
+                    axes[1].plot(timestamps, processed, 'darkgreen', linewidth=2, label='Preprocessed')
+                    print("DEBUG: Preprocessed signal plotted")
+                else:
+                    print(f"DEBUG: Length mismatch - processed: {len(processed)}, timestamps: {len(timestamps)}")
+            else:
+                print("DEBUG: Preprocessing returned None")
+                
+            axes[1].set_title('Signal Preprocessing')
+            axes[1].set_xlabel('Time (seconds)')
+            axes[1].set_ylabel('Amplitude')
+            axes[1].legend()
+            axes[1].grid(True, alpha=0.3)
+            print("DEBUG: Preprocessed plot completed")
         
         # 3. Filtered signal
-        filtered_signal = self.advanced_filter_signal(green_signal)
-        if filtered_signal is not None and len(filtered_signal) == len(timestamps):
-            axes[2].plot(timestamps, filtered_signal, 'navy', linewidth=2, label='Filtered Signal')
-            
-            # Add peaks if available
-            try:
-                threshold = np.std(filtered_signal) * 0.3
-                min_distance = int(self.fps * 60 / 200)
-                peaks, _ = find_peaks(filtered_signal, height=threshold, distance=min_distance)
-                if len(peaks) > 0:
-                    axes[2].plot(timestamps[peaks], filtered_signal[peaks], 'ro', markersize=6, label='Detected Peaks')
-            except:
-                pass
+            filtered_signal = self.advanced_filter_signal(green_signal)
+            if filtered_signal is not None and len(filtered_signal) == len(timestamps):
+                axes[2].plot(timestamps, filtered_signal, 'navy', linewidth=2, label='Filtered Signal')
                 
-        axes[2].set_title('Filtered Signal with Peak Detection')
-        axes[2].set_xlabel('Time (seconds)')
-        axes[2].set_ylabel('Amplitude')
-        axes[2].legend()
-        axes[2].grid(True, alpha=0.3)
-        
-        # 4. FFT Spectrum
-        if filtered_signal is not None:
-            n_samples = len(filtered_signal)
-            fft_values = fft(filtered_signal)
-            frequencies = fftfreq(n_samples, 1/self.fps)
+                # Add peaks if available
+                try:
+                    threshold = np.std(filtered_signal) * 0.3
+                    min_distance = int(self.fps * 60 / 200)
+                    peaks, _ = find_peaks(filtered_signal, height=threshold, distance=min_distance)
+                    if len(peaks) > 0:
+                        axes[2].plot(timestamps[peaks], filtered_signal[peaks], 'ro', markersize=6, label='Detected Peaks')
+                        print(f"DEBUG: Found {len(peaks)} peaks for visualization")
+                except Exception as e:
+                    print(f"DEBUG: Peak finding error: {e}")
+                    
+            axes[2].set_title('Filtered Signal with Peak Detection')
+            axes[2].set_xlabel('Time (seconds)')
+            axes[2].set_ylabel('Amplitude')
+            axes[2].legend()
+            axes[2].grid(True, alpha=0.3)
+            print("DEBUG: Filtered signal plot completed")
             
-            pos_mask = (frequencies > 0) & (frequencies < 5)
-            plot_frequencies = frequencies[pos_mask]
-            plot_fft_magnitude = np.abs(fft_values[pos_mask])
+            # 4. FFT Spectrum
+            print("DEBUG: Computing FFT spectrum...")
+            if filtered_signal is not None:
+                try:
+                    n_samples = len(filtered_signal)
+                    fft_values = fft(filtered_signal)
+                    frequencies = fftfreq(n_samples, 1/self.fps)
+                    
+                    pos_mask = (frequencies > 0) & (frequencies < 5)
+                    plot_frequencies = frequencies[pos_mask]
+                    plot_fft_magnitude = np.abs(fft_values[pos_mask])
+                    
+                    axes[3].plot(plot_frequencies * 60, plot_fft_magnitude)
+                    axes[3].axvspan(50, 180, alpha=0.2, color='red', label='Valid HR Range')
+                    axes[3].set_title('Frequency Spectrum Analysis')
+                    axes[3].set_xlabel('Heart Rate (BPM)')
+                    axes[3].set_ylabel('FFT Magnitude')
+                    axes[3].legend()
+                    axes[3].grid(True, alpha=0.3)
+                except Exception as e:
+                    print(f"DEBUG: FFT spectrum error: {e}")
+                    traceback.print_exc()
             
-            axes[3].plot(plot_frequencies * 60, plot_fft_magnitude)
-            axes[3].axvspan(50, 180, alpha=0.2, color='red', label='Valid HR Range')
-            axes[3].set_title('Frequency Spectrum Analysis')
-            axes[3].set_xlabel('Heart Rate (BPM)')
-            axes[3].set_ylabel('FFT Magnitude')
-            axes[3].legend()
-            axes[3].grid(True, alpha=0.3)
-        
-        # 5. Heart rate estimation comparison
-        hr_estimate, confidence, methods = self.heart_rate_estimation()
-        
-        method_names = list(methods.keys())
-        hrs = [methods[m][0] if methods[m][0] is not None else 0 for m in method_names]
-        confs = [methods[m][1] for m in method_names]
-        
-        x_pos = np.arange(len(method_names))
-        bars = axes[4].bar(x_pos, hrs, alpha=0.7)
-        axes[4].set_xlabel('Estimation Method')
-        axes[4].set_ylabel('Heart Rate (BPM)')
-        axes[4].set_title('Heart Rate Estimation Comparison')
-        axes[4].set_xticks(x_pos)
-        axes[4].set_xticklabels(method_names)
-        
-        # Color bars by confidence
-        for i, (bar, conf) in enumerate(zip(bars, confs)):
-            bar.set_color(plt.cm.RdYlGn(conf))
-            axes[4].text(bar.get_x() + bar.get_width()/2., bar.get_height() + 1,
-                        f'{conf:.3f}', ha='center', va='bottom', fontsize=9)
-        
-        axes[4].grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plt.show()
-        
-        # Print detailed results
-        print(f"\n=== Detailed Analysis Results ===")
-        print(f"Combined Estimate: {hr_estimate:.1f} BPM (Confidence: {confidence:.3f})")
-        print(f"\nMethod Breakdown:")
-        for method, (hr, conf) in methods.items():
-            print(f"  {method.capitalize()}: {hr:.1f if hr else 'N/A'} BPM (conf: {conf:.3f})")
+            # 5. Heart rate estimation comparison
+            print("DEBUG: Getting heart rate estimations...")
+            hr_estimate, confidence, methods = self.heart_rate_estimation()
+            
+            if methods:
+                method_names = list(methods.keys())
+                hrs = [methods[m][0] if methods[m][0] is not None else 0 for m in method_names]
+                confs = [methods[m][1] for m in method_names]
+                
+                x_pos = np.arange(len(method_names))
+                bars = axes[4].bar(x_pos, hrs, alpha=0.7)
+                axes[4].set_xlabel('Estimation Method')
+                axes[4].set_ylabel('Heart Rate (BPM)')
+                axes[4].set_title('Heart Rate Estimation Comparison')
+                axes[4].set_xticks(x_pos)
+                axes[4].set_xticklabels(method_names)
+                
+                # Color bars by confidence
+                for i, (bar, conf) in enumerate(zip(bars, confs)):
+                    bar.set_color(plt.cm.RdYlGn(conf))
+                    axes[4].text(bar.get_x() + bar.get_width()/2., bar.get_height() + 1,
+                                f'{conf:.3f}', ha='center', va='bottom', fontsize=9)
+                
+                axes[4].grid(True, alpha=0.3)
+                print("DEBUG: HR comparison plot completed")
+            else:
+                print("DEBUG: No methods available for comparison plot")
+            
+            print("DEBUG: Finalizing plot layout...")
+            plt.tight_layout()
+            
+            print("DEBUG: Showing plot...")
+            plt.show()
+            
+            # Print detailed results
+            print(f"\n=== DEBUG Detailed Analysis Results ===")
+            if hr_estimate is not None:
+                print(f"Combined Estimate: {hr_estimate:.1f} BPM (Confidence: {confidence:.3f})")
+                print(f"\nMethod Breakdown:")
+                for method, (hr, conf) in methods.items():
+                    print(f"  {method.capitalize()}: {'{:.1f}'.format(hr) if hr else 'N/A'} BPM (conf: {conf:.3f})")
+            else:
+                print("No valid heart rate estimate obtained")
+                
+        except Exception as e:
+            print(f"DEBUG ERROR in visualize_results_detailed: {e}")
+            traceback.print_exc()
 
-
+# ground truth processing from BVP signal
 def ground_truth_processing(gt_path, fps=30):
     try:
         # Read the BVP signal
@@ -528,6 +564,7 @@ def ground_truth_processing(gt_path, fps=30):
             print("No valid BVP values found in ground truth file")
             return None
         
+        # convert list to numpy array
         bvp_signal = np.array(bvp_values)
         
         # Estimate HR from BVP signal using multiple methods
@@ -556,8 +593,8 @@ def ground_truth_processing(gt_path, fps=30):
         print(f"Error processing ground truth: {e}")
         return None
 
+# Estimate HR from BVP using peak detection
 def estimate_hr_from_bvp_peaks(bvp_signal, fps=30):
-    """Estimate HR from BVP using peak detection"""
     try:
         # Preprocessing
         bvp_filtered = detrend(bvp_signal)
@@ -587,11 +624,12 @@ def estimate_hr_from_bvp_peaks(bvp_signal, fps=30):
             
         hr = 60 / np.mean(valid_intervals)
         return hr if 50 <= hr <= 180 else None
-    except:
+    except Exception as e:
+        print(f"HR from BVP, peaks estimation error: {e}")
         return None
 
+# Estimate HR from BVP using FFT
 def estimate_hr_from_bvp_fft(bvp_signal, fps=30):
-    """Estimate HR from BVP using FFT"""
     try:
         # Preprocessing
         bvp_processed = detrend(bvp_signal)
@@ -616,11 +654,12 @@ def estimate_hr_from_bvp_fft(bvp_signal, fps=30):
         hr = peak_freq * 60
         
         return hr if 50 <= hr <= 180 else None
-    except:
+    except Exception as e:
+        print(f"HR from BVP, FFT estimation error: {e}")
         return None
 
+# Estimate HR using sliding window approach
 def estimate_hr_from_bvp_sliding(bvp_signal, fps=30, window_sec=10):
-    """Estimate HR using sliding window approach"""
     try:
         window_size = int(window_sec * fps)
         if len(bvp_signal) < window_size:
@@ -643,14 +682,14 @@ def estimate_hr_from_bvp_sliding(bvp_signal, fps=30, window_sec=10):
                 peak_freq = hr_freqs[np.argmax(hr_mags)]
                 hr = peak_freq * 60
                 if 50 <= hr <= 180:
-                    hr_estimates.append(hr)
+                    hr_estimates.append(hr) # add valid estimate to list
         
         if len(hr_estimates) >= 3:
             return np.median(hr_estimates)
         return None
-    except:
+    except Exception as e:
+        print(f"HR from BVP, sliding window estimation error: {e}")
         return None
-
 
 class UBFCDatasetLoader:
     
@@ -660,7 +699,6 @@ class UBFCDatasetLoader:
         self.load_dataset_structure()
     
     def load_dataset_structure(self):
-        """Load dataset structure with better error handling"""
         if not self.dataset_path.exists():
             print(f"Error: Dataset path does not exist: {self.dataset_path}")
             return
@@ -692,7 +730,6 @@ class UBFCDatasetLoader:
             return None
         return self.subjects[subject_idx]
 
-
 def demo_rppg():
     print("=== rPPG Heart Rate Detection Demo ===\n")
 
@@ -705,7 +742,6 @@ def demo_rppg():
         return
     
     try:
-        # Load dataset
         dataset = UBFCDatasetLoader(dataset_path)
         
         if len(dataset.subjects) == 0:
