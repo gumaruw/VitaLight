@@ -4,6 +4,17 @@ A system that detects heart rate from facial video using subtle color changes in
 
 ---
 
+This project is structured according to the Spiral Model. Each iteration (cycle) consists of four stages:
+
+1. Planning → Define objectives
+2. Risk Analysis / Research → Identify uncertainties
+3. Development / Prototyping → Implement and experiment
+4. Evaluation → Analyze outcomes
+
+After evaluation, the next cycle begins.
+
+---
+
 # VitaLight Flowchart
 
 ```mermaid
@@ -42,17 +53,19 @@ flowchart TD
 
 ---
 
-## Project Phases
+## Project Iterations
 
-### Phase 1: Initial Implementation
+### Iteration 1: Initial Implementation
 
-- **Dataset Understanding**: Explored UBFC-2 dataset format
-- **Face Detection**: Implemented using OpenCV
-- **ROI Extraction**: Extracted signals from the forehead region
-- **Basic Signal Processing**: Converted RGB values to time series
-- **Heart Rate Estimation**: Used FFT to estimate heart rate
+**Planning**
 
-**Challenges & Notes:**
+- Explore UBFC-2 dataset format
+- Implement face detection with OpenCV
+- Extract signals from the forehead region
+- Convert RGB values to time series
+- Estimate HR using FFT
+
+**Results:**
 
 - Worked initially on Kaggle; resolved attribute errors.
 - Adjusted code to handle missing `hr` in `ground_truth.txt`.
@@ -64,11 +77,15 @@ flowchart TD
   - Estimated HR: 107.1 BPM
   - Error: 70.8 BPM
   - Relative Error: 194.7%
+
+**Evaluation:**
+
+- Large errors (194% relative error). Decided to refine preprocessing and ROI strategy.
 - Decided to switch to VS Code for development.
 
 ---
 
-### Phase 1.5: Improvements
+### Iteration 1.5: Improvements
 
 - ✅ Multi-ROI signal extraction
 - ✅ Advanced filtering (detrending, normalization)
@@ -77,23 +94,39 @@ flowchart TD
 - ✅ Comprehensive visualization
 - ✅ Robust error handling
 
+**Results:**
+
+- Combined Estimate: 103.3 BPM (Confidence: 0.584)
+- Method Breakdown:
+  - FFT → 89.0 BPM (Confidence: 0.021, unreliable)
+  - Peaks → 112.4 BPM (Confidence: 0.855, most stable)
+  - Autocorrelation → 78.3 BPM (Confidence: 0.313, partially consistent)
+- Ground truth BVP signal could not be reliably parsed → no direct error comparison available
+
+**Evaluation:**
+
+- Accuracy could not be quantified due to missing ground truth processing
+- More stable results, but overall accuracy remained limited.
+- Confidence-weighted fusion improved stability compared to individual methods
+- Next step: refine signal quality assessment and integrate more advanced algorithms (e.g., CHROM)
+
 ---
 
-### Phase 2: Advanced Signal Processing
+### Iteration 2: Advanced Signal Processing
 
-**Goals:**
+**Planning:**
 
-- Implement CHROM algorithm
-- Apply sophisticated filtering
-- Significantly improve accuracy
+- Integrate CHROM algorithm
+- Improve filtering and temporal stability
+- Reduce error margin to acceptable levels
 
 **Key Components:**
 
-- **CHROM Algorithm**: Advanced color-change detection
-- **Adaptive Filtering**: Bandpass filters, moving average, detrending
-- **Multi-ROI Processing**: Combine signals from multiple face regions
-- **Signal Quality Assessment**: Detect and handle poor quality signals
-- **Temporal Consistency**: Smooth heart rate estimates over time
+- CHROM Algorithm for robust signal construction
+- Adaptive Filtering: bandpass, detrending, moving average
+- Multi-ROI Processing for signal fusion
+- Signal Quality Assessment to reject noisy data
+- Temporal Consistency for smoothed HR estimates
 
 **Results:**
 
@@ -111,17 +144,44 @@ flowchart TD
 - Fixed filtfilt "padlen" error on short signals
 - Improved accuracy vs. ground truth (95.3 BPM est. vs 102.0 BPM true, 6.5% error)
 
+**Evaluation:**
+
+- Accuracy significantly improved (error reduced to ~6.5%).
+- Based on my literature review, I decided to experiment with the POS algorithm.
+  - The paper “Effectiveness of Remote PPG Construction Methods: A Preliminary Analysis” compares eight rPPG methods (POS, LGI, CHROM, OMIT, GREEN, ICA, PCA, PBV).
+  - Results show that POS demonstrates superior robustness in challenging conditions (motion and natural light), particularly for heart rate estimation.
+- Next step: implement hybrid approaches, combining GREEN, CHROM, and POS for enhanced stability and accuracy.
+
 ---
 
-### Phase 3: Machine Learning Enhancement
+### Iteration 3: Hybrid Methods & Optimization
 
 _Current status: actively working here._
 
-**Goals:**
+**Planning:**
 
-- Train ML models on Kaggle datasets
-- Integrate deep learning components
-- Achieve research-level accuracy
+- Combine multiple methods (POS, CHROM, GREEN) for robustness
+- Optimize preprocessing and temporal stability
+- Benchmark hybrid pipeline vs. individual algorithms
+
+**Key Components:**
+
+- Hybrid Algorithm Design: weighted combination of POS, CHROM, GREEN
+- Dynamic Method Selection: switch algorithms based on signal quality
+- Performance Benchmarking: cross-dataset evaluation
+
+**Results:**
+
+- **Evaluation:**
+
+- ***
+
+### Iteration 4: Machine Learning Enhancement
+
+**Planning:**
+
+- Integrate deep learning for generalization and temporal modeling
+- Aim for research-grade accuracy
 
 **Key Components:**
 
@@ -134,15 +194,18 @@ _Current status: actively working here._
 - **Model Training on Kaggle**: Leverage free GPU
 - **Model Optimization**: Quantization, pruning for deployment
 
----
+**Results:**
 
-### Phase 4: Real-time Implementation & Web App
+- **Evaluation:**
 
-**Goals:**
+- ***
 
-- Real-time processing pipeline
-- User-friendly web interface
-- Deploy final application
+### Iteration 5: Real-time Implementation & Web App
+
+**Planning:**
+
+- Transition from research to real-time application
+- Design a web-based and mobile-ready solution
 
 **Key Components:**
 
@@ -151,3 +214,16 @@ _Current status: actively working here._
 - **Model Integration**: Seamless local model loading
 - **Visualization**: Real-time plots and heart rate history
 - **Error Handling**: Robust error management and user feedback
+
+**Results:**
+
+- **Evaluation:**
+
+- ***
+
+  **Summary:**
+
+- The Spiral Model is well-suited for this project due to its risk-driven and research-oriented nature.
+- Each iteration refines the system, balancing exploration (research) and consolidation (implementation).
+- The project goal remains constant: Develop a system that extracts signals from facial video and reliably estimates heart rate.
+- Methods, filters, and models evolve through iterative experimentation.
