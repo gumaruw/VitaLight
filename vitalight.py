@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 from scipy import signal
 from scipy.fft import fft, fftfreq
 from scipy.signal import find_peaks, butter, filtfilt, detrend
+from sklearn.decomposition import FastICA
 import os
 import pandas as pd
 from pathlib import Path
@@ -28,8 +29,10 @@ class rPPGProcessor:
         self.rgb_signals = [] # color change signals from face
         self.timestamps = [] # time values for each frame
         self.face_locations = []  # Face tracking
-
-        print("rPPGProcessor initialized successfully")
+        self.roi_signals = {}  # Store individual ROI signals
+        
+        # Quality tracking
+        self.signal_quality_scores = []
 
     # face detection with multiple ROIs
     def detect_face_roi(self, frame):
@@ -53,78 +56,117 @@ class rPPGProcessor:
         # Multiple ROIs - forehead, left cheek, right cheek
         rois = {} # dictionary to hold ROIs
         
-        # Forehead ROI
-        forehead_x = x + w // 4
-        forehead_y = y + h // 8
-        forehead_w = w // 2
-        forehead_h = h // 4
+        # Forehead ROI - larger, more stable region
+        forehead_x = x + w // 5
+        forehead_y = y + h // 10
+        forehead_w = 3 * w // 5
+        forehead_h = h // 3
         rois['forehead'] = frame[forehead_y:forehead_y+forehead_h, forehead_x:forehead_x+forehead_w]
         
         # Left cheek ROI
-        left_cheek_x = x + w // 8
-        left_cheek_y = y + h // 2
-        left_cheek_w = w // 4
-        left_cheek_h = h // 6
+        left_cheek_x = x + w // 10
+        left_cheek_y = y + 2*h // 5
+        left_cheek_w = w // 3
+        left_cheek_h = h // 4
         rois['left_cheek'] = frame[left_cheek_y:left_cheek_y+left_cheek_h, left_cheek_x:left_cheek_x+left_cheek_w]
         
         # Right cheek ROI
-        right_cheek_x = x + 5*w // 8
-        right_cheek_y = y + h // 2
-        right_cheek_w = w // 4
-        right_cheek_h = h // 6
+        right_cheek_x = x + 3*w // 5
+        right_cheek_y = y + 2*h // 5
+        right_cheek_w = w // 3
+        right_cheek_h = h // 4
         rois['right_cheek'] = frame[right_cheek_y:right_cheek_y+right_cheek_h, right_cheek_x:right_cheek_x+right_cheek_w]
         
-        return rois, (x, y, w, h), {
+        roi_coords = {
             'forehead': (forehead_x, forehead_y, forehead_w, forehead_h),
             'left_cheek': (left_cheek_x, left_cheek_y, left_cheek_w, left_cheek_h),
             'right_cheek': (right_cheek_x, right_cheek_y, right_cheek_w, right_cheek_h)
         }
+        
+        return rois, (x, y, w, h), roi_coords
     
-    # extract RGB signals from ROIs with quality checks
-    def extract_rgb_signal(self, rois):
-        if not rois or len(rois) == 0:
-            return None # no ROIs
+    # Quality assessment for ROI signals
+    def assess_signal_quality(self, roi):
+        if roi is None or roi.size == 0:
+            return 0.0
             
-        signals = {} # dictionary to hold rgb values
+        # Convert to grayscale for analysis
+        gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        
+        # Multiple quality metrics
+        brightness = np.mean(gray_roi)
+        contrast = np.std(gray_roi)
+        
+        # Check for good skin tone range - avoid too dark or too bright regions
+        brightness_score = 1.0 if 40 < brightness < 200 else max(0.0, 1.0 - abs(brightness - 120) / 120)
+        contrast_score = min(1.0, contrast / 30.0)  # Higher contrast is better up to a point
+        
+        # Size quality (larger ROIs are generally better)
+        size_score = min(1.0, roi.size / 10000.0)
+        
+        # Combined quality score (weighted average, forehead gets more weight cuz it's more stable) 
+        quality = 0.5 * brightness_score + 0.3 * contrast_score + 0.2 * size_score
+        return quality
+
+    # CHROM algorithm for robust rPPG signal extraction
+    def extract_chrom_signal(self, rois):
+        if not rois or len(rois) == 0:
+            return None, 0.0
+            
+        # Extract RGB signals from each ROI with quality weighting
+        roi_data = {}
+        total_quality = 0.0
         
         for roi_name, roi in rois.items():
             if roi is None or roi.size == 0:
                 continue
                 
-            # Calculate mean RGB values
+            # Calculate mean RGB
             mean_rgb = np.mean(roi, axis=(0, 1))
+            rgb_values = [mean_rgb[2], mean_rgb[1], mean_rgb[0]]  # BGR to RGB
             
-            # Convert BGR to RGB
-            rgb_values = [mean_rgb[2], mean_rgb[1], mean_rgb[0]]  # [R, G, B]
+            # Assess quality
+            quality = self.assess_signal_quality(roi)
             
-            # Simple quality check - avoid too dark or too bright regions
-            brightness = np.mean(mean_rgb)
-            if 30 < brightness < 220:  # Good brightness range
-                signals[roi_name] = rgb_values
+            if quality > 0.3:  # Only use decent quality signals
+                roi_data[roi_name] = {
+                    'rgb': rgb_values,
+                    'quality': quality
+                }
+                total_quality += quality
         
-        # Combine signals (weighted average, forehead gets more weight cuz it's more stable)
-        if 'forehead' in signals:
-            final_signal = signals['forehead']
-            weight_sum = 1.0
-            
-            # Add cheek contributions with lower weights
-            if 'left_cheek' in signals:
-                final_signal = [final_signal[i]*1.0 + signals['left_cheek'][i]*0.3 for i in range(3)]
-                weight_sum += 0.3
-                
-            if 'right_cheek' in signals:
-                final_signal = [final_signal[i] + signals['right_cheek'][i]*0.3 for i in range(3)]
-                weight_sum += 0.3
-            
-            # Normalize by total weight
-            final_signal = [val/weight_sum for val in final_signal]
-            return final_signal
+        if not roi_data:
+            return None, 0.0
         
-        # Fallback to any available signal (if forehead missing)
-        elif signals:
-            return list(signals.values())[0]
+        # CHROM algorithm implementation
+        # Combine RGB signals with quality weighting
+        combined_rgb = np.zeros(3)
+        for roi_name, data in roi_data.items():
+            weight = data['quality'] / total_quality
+            combined_rgb += np.array(data['rgb']) * weight
         
-        return None
+        # CHROM transformation
+        R, G, B = combined_rgb
+        
+        # Normalize by mean to reduce illumination effects
+        R_norm = R / (R + G + B + 1e-8)
+        G_norm = G / (R + G + B + 1e-8)
+        
+        # CHROM linear combination (optimized coefficients)
+        X = 3 * R_norm - 2 * G_norm
+        Y = 1.5 * R_norm + G_norm - 1.5 * B / (R + G + B + 1e-8)
+        
+        # The CHROM signal is the X component (most sensitive to pulse)
+        chrom_signal = X
+        
+        # Store individual ROI signals for analysis
+        for roi_name, data in roi_data.items():
+            if roi_name not in self.roi_signals:
+                self.roi_signals[roi_name] = []
+            self.roi_signals[roi_name].append(data['rgb'])
+        
+        avg_quality = total_quality / len(roi_data)
+        return chrom_signal, avg_quality
     
     # main video processing loop
     def process_video(self, video_path):
@@ -138,12 +180,12 @@ class rPPGProcessor:
         self.rgb_signals = []
         self.timestamps = []
         self.face_locations = []
+        self.roi_signals = {}
+        self.signal_quality_scores = []
         
         frame_count = 0
         successful_extractions = 0
         consecutive_failures = 0
-        
-        print(f"Processing video: {video_path}")
         
         # read video frame by frame
         while True:
@@ -157,13 +199,14 @@ class rPPGProcessor:
             rois, face_rect, roi_coords = self.detect_face_roi(frame)
             
             if rois is not None:
-                # Extract combined RGB signal
-                rgb_values = self.extract_rgb_signal(rois)
+                # Extract CHROM signal
+                chrom_value, quality = self.extract_chrom_signal(rois)
                 
-                if rgb_values is not None:
-                    self.rgb_signals.append(rgb_values)
+                if chrom_value is not None and quality > 0.2:
+                    self.rgb_signals.append(chrom_value)
                     self.timestamps.append(timestamp)
                     self.face_locations.append(face_rect)
+                    self.signal_quality_scores.append(quality)
                     successful_extractions += 1
                     consecutive_failures = 0
                 else:
@@ -183,121 +226,156 @@ class rPPGProcessor:
                 print(f"Processed {frame_count} frames ({frame_count/self.fps:.1f}s), extracted {successful_extractions} signals")
         
         cap.release()
-        
-        print(f"Video processing completed!")
-        print(f"Total frames: {frame_count} ({frame_count/self.fps:.1f}s)")
-        print(f"Successful extractions: {successful_extractions}")
-        print(f"Success rate: {successful_extractions/frame_count*100:.1f}%")
-        
+        print(f"Processing completed: {successful_extractions}/{frame_count} frames")
         return len(self.rgb_signals) > 0
-    
-    # basic preprocessing: detrend and normalize
-    def preprocess_signal(self, signal_data):
-        print(f"DEBUG: Preprocessing signal of length {len(signal_data)}")
+
+    # Multi-stage temporal filtering
+    def temporal_filtering(self, signal_data):
         if len(signal_data) < self.fps * 2:  # Need at least 2 seconds
             return None
         
-        try:
-            # Convert list to numpy array
-            signal_array = np.array(signal_data)
-            
-            # Detrend to remove slow variations (for slow changes like light and brightness)
-            detrended = detrend(signal_array, type='linear')
-            
-            # Normalize to zero mean, unit variance (this way i only keep relative changes -heartbeat)
-            signal_std = np.std(detrended)
-            if signal_std < 1e-8:
-                print("DEBUG: Signal has zero variance, returning None")
-                return None
-                
-            normalized = (detrended - np.mean(detrended)) / signal_std
-            return normalized
+        # Convert list to numpy array
+        signal_array = np.array(signal_data)
         
-        except Exception as e:
-            print(f"DEBUG ERROR in preprocess_signal: {e}")
-            traceback.print_exc()
-            return None
-    
-    # advanced filtering with bandpass and smoothing
-    def advanced_filter_signal(self, signal_data):
-
-        # Preprocessing
-        processed_signal = self.preprocess_signal(signal_data)
-        if processed_signal is None:
-            return None
+        # 1. Detrending - remove slow variations (for slow changes like light and brightness)
+        detrended = detrend(signal_array, type='linear')
         
-        # bandpass filter design
+        # 2. Moving average filter for smoothing
+        window_size = max(3, self.fps // 10)  # ~0.1 second window
+        smoothed = np.convolve(detrended, np.ones(window_size)/window_size, mode='same')
+        
+        # 3. Bandpass filter design
         nyquist = 0.5 * self.fps
-        low = self.hr_freq_min / nyquist
-        high = self.hr_freq_max / nyquist
-        
+
         # Ensure filter coefficients are in valid range (0,1)
-        low = max(0.01, min(low, 0.99))
-        high = max(low + 0.01, min(high, 0.99))
+        low = max(0.01, self.hr_freq_min / nyquist)
+        high = min(0.99, self.hr_freq_max / nyquist)
         
         try:
             # butterworth bandpass filter
             b, a = butter(4, [low, high], btype='band')
-            filtered_signal = filtfilt(b, a, processed_signal)
+            filtered = filtfilt(b, a, smoothed)
             
-            # Additional smoothing filter
-            b_smooth, a_smooth = butter(2, 0.1, btype='low')
-            smoothed = filtfilt(b_smooth, a_smooth, filtered_signal)
+            # 4. Normalize
+            filtered_norm = (filtered - np.mean(filtered)) / (np.std(filtered) + 1e-8)
             
-            return smoothed  # Return the smoothed version
-            
+            return filtered_norm
         except Exception as e:
             print(f"Filtering error: {e}")
-            return processed_signal
-    
-    # heart rate estimation using fft, peaks, autocorr
-    def heart_rate_estimation(self, rgb_channel='G'):
-        if len(self.rgb_signals) < self.fps * 3:  # Need at least 3 seconds
+            return smoothed
+
+    def signal_quality_filtering(self):
+        """Filter signals based on quality scores"""
+        if len(self.signal_quality_scores) == 0:
+            return self.rgb_signals
+        
+        # Calculate quality threshold (keep top 70% of signals)
+        quality_threshold = np.percentile(self.signal_quality_scores, 30)
+        
+        filtered_signals = []
+        filtered_timestamps = []
+        
+        for i, (signal, quality) in enumerate(zip(self.rgb_signals, self.signal_quality_scores)):
+            if quality >= quality_threshold:
+                filtered_signals.append(signal)
+                filtered_timestamps.append(self.timestamps[i])
+        
+        return filtered_signals
+
+    def ica_signal_separation(self, multi_roi_signals):
+        """Use ICA to separate pulse signal from noise"""
+        if len(multi_roi_signals) < 3 or len(self.roi_signals) < 2:
+            return None
+        
+        try:
+            # Prepare multi-channel data
+            channels = []
+            for roi_name, roi_data in self.roi_signals.items():
+                if len(roi_data) > len(multi_roi_signals) * 0.8:  # Use ROIs with sufficient data
+                    # Use green channel (index 1) as it's most sensitive to pulse
+                    green_channel = [rgb[1] for rgb in roi_data[:len(multi_roi_signals)]]
+                    channels.append(green_channel)
+            
+            if len(channels) < 2:
+                return None
+            
+            # Apply ICA
+            ica = FastICA(n_components=min(len(channels), 3), random_state=42, max_iter=1000)
+            signals_matrix = np.array(channels).T
+            ica_signals = ica.fit_transform(signals_matrix)
+            
+            # Select component with strongest heart rate signal
+            best_component = None
+            best_hr_power = 0
+            
+            for component in ica_signals.T:
+                # Quick FFT to find HR power
+                fft_vals = np.abs(fft(component))
+                freqs = fftfreq(len(component), 1/self.fps)
+                hr_mask = (freqs >= self.hr_freq_min) & (freqs <= self.hr_freq_max)
+                hr_power = np.sum(fft_vals[hr_mask])
+                
+                if hr_power > best_hr_power:
+                    best_hr_power = hr_power
+                    best_component = component
+            
+            return best_component
+        except:
+            return None
+        
+    def heart_rate_estimation(self):
+        if len(self.rgb_signals) < self.fps * 3:
             return None, 0, {}
         
-        # Convert to numpy array
-        rgb_array = np.array(self.rgb_signals)
+        # Use quality-filtered signals
+        quality_signals = self.signal_quality_filtering()
         
-        # Select channel (Green is usually best)
-        channel_map = {'R': 0, 'G': 1, 'B': 2}
-        channel_signal = rgb_array[:, channel_map[rgb_channel]]
+        if len(quality_signals) < self.fps * 3:
+            return None, 0, {}
         
-        # Apply advanced filtering
-        filtered_signal = self.advanced_filter_signal(channel_signal)
+        # Apply temporal filtering
+        filtered_signal = self.temporal_filtering(quality_signals)
         if filtered_signal is None:
             return None, 0, {}
         
-        # Method 1: FFT-based estimation
-        fft_hr, fft_confidence = self.fft_heart_rate_estimation(filtered_signal)
+        # Try ICA separation if multi-ROI data available
+        ica_signal = self.ica_signal_separation(quality_signals)
+        if ica_signal is not None and len(ica_signal) == len(filtered_signal):
+            # Combine filtered and ICA signals
+            combined_signal = 0.7 * filtered_signal + 0.3 * ica_signal
+        else:
+            combined_signal = filtered_signal
         
-        # Method 2: Peak-based estimation
-        peak_hr, peak_confidence = self.peak_heart_rate_estimation(filtered_signal)
-        
-        # Method 3: Autocorrelation-based estimation
-        autocorr_hr, autocorr_confidence = self.autocorr_heart_rate_estimation(filtered_signal)
+        # Multiple estimation methods
+        fft_hr, fft_conf = self.fft_estimation(combined_signal)
+        peak_hr, peak_conf = self.peak_estimation(combined_signal)
+        autocorr_hr, autocorr_conf = self.autocorr_estimation(combined_signal)
+        welch_hr, welch_conf = self.welch_estimation(combined_signal)  
         
         # Combine estimates with confidence weighting
         methods = {
-            'fft': (fft_hr, fft_confidence),
-            'peaks': (peak_hr, peak_confidence),
-            'autocorr': (autocorr_hr, autocorr_confidence)
+            'fft': (fft_hr, fft_conf),
+            'peaks': (peak_hr, peak_conf),
+            'autocorr': (autocorr_hr, autocorr_conf),
+            'welch': (welch_hr, welch_conf)
         }
         
         # Filter out invalid or low confidence estimates
-        valid_methods = {k: v for k, v in methods.items() if v[0] is not None and v[1] > 0.1}
+        valid_methods = {k: v for k, v in methods.items() 
+                        if v[0] is not None and v[1] > 0.1 and 50 <= v[0] <= 180}
         
         if not valid_methods:
             return None, 0, methods
         
         # Weighted average based on confidence
         total_weight = sum(conf for _, conf in valid_methods.values())
-        weighted_hr = sum(hr * conf for hr, conf in valid_methods.values()) / total_weight # bpm
+        weighted_hr = sum(hr * conf for hr, conf in valid_methods.values()) / total_weight
         avg_confidence = total_weight / len(valid_methods)
         
         return weighted_hr, avg_confidence, methods
-    
+
     # fft-based heart-rate estimation
-    def fft_heart_rate_estimation(self, signal_data):
+    def fft_estimation(self, signal_data):
         try:
             # Perform FFT
             n_samples = len(signal_data)
@@ -305,290 +383,329 @@ class rPPGProcessor:
             frequencies = fftfreq(n_samples, 1/self.fps) # her FFT katsayısının frekans karşılığı
             
             # Keep only positive frequencies in HR range
-            pos_mask = (frequencies > self.hr_freq_min) & (frequencies < self.hr_freq_max)
-            hr_frequencies = frequencies[pos_mask]
-            hr_fft_magnitude = np.abs(fft_values[pos_mask])
+            hr_mask = (frequencies > self.hr_freq_min) & (frequencies < self.hr_freq_max)
+
+            if not np.any(hr_mask):  # Check if mask has any True values
+                return None, 0
+        
+            hr_frequencies = frequencies[hr_mask]
+            hr_magnitudes = np.abs(fft_values[hr_mask])
             
             if len(hr_frequencies) == 0:
                 return None, 0
             
             # Find peak
-            peak_idx = np.argmax(hr_fft_magnitude)
-            peak_frequency = hr_frequencies[peak_idx]
-            heart_rate = peak_frequency * 60
+            peak_idx = np.argmax(hr_magnitudes)
+            peak_freq = hr_frequencies[peak_idx]
+            heart_rate = peak_freq * 60
             
             # Calculate confidence
-            total_power = np.sum(hr_fft_magnitude)
-            peak_power = hr_fft_magnitude[peak_idx]
-            confidence = peak_power / total_power if total_power > 0 else 0
+            total_power = np.sum(hr_magnitudes)
+            peak_power = hr_magnitudes[peak_idx]
+
+            # Check for secondary peaks (harmonic validation)
+            sorted_indices = np.argsort(hr_magnitudes)[::-1]
+            secondary_ratio = hr_magnitudes[sorted_indices[1]] / peak_power if len(sorted_indices) > 1 else 0
             
+            base_confidence = peak_power / total_power
+            harmonic_bonus = 0.2 if secondary_ratio < 0.5 else 0  # Single dominant peak is better
+            
+            confidence = min(1.0, base_confidence + harmonic_bonus)
+
             return heart_rate, confidence
             # heart rate= bpm, confidence= 0-1
         except Exception as e:
             print(f"FFT estimation error: {e}")
             return None, 0
     
-    # Peak-based heart rate estimation
-    def peak_heart_rate_estimation(self, signal_data):
+    # Peak-based heart rate estimation with adaptive thresholding
+    def peak_estimation(self, signal_data):
         
         try:
             # Find peaks in signal
             # Adaptive threshold based on signal properties 
             # çok küçük dalgalalanmaları göz ardı etmek için sinyalin standart sapmasına göre ayarlıyoruz
-            threshold = np.std(signal_data) * 0.3
+            signal_std = np.std(signal_data)
+            threshold = max(0.1 * signal_std, np.percentile(signal_data, 75))
             min_distance = int(self.fps * 60 / 200)  # Minimum distance between peaks (200 BPM max)
             
             peaks, properties = find_peaks(signal_data, height=threshold, distance=min_distance)
             
-            if len(peaks) < 3:  # Need at least 3 peaks
+            if len(peaks) < 4:  # Need at least 4 peaks
                 return None, 0
             
             # Calculate intervals between peaks
-            peak_intervals = np.diff(peaks) / self.fps  # Convert to seconds
+            intervals = np.diff(peaks) / self.fps  # Convert to seconds
             
             # Medyana göre çok sapmış interval değerlerini çıkar
-            median_interval = np.median(peak_intervals)
-            mad = np.median(np.abs(peak_intervals - median_interval))  # Median Absolute Deviation - MAD
+            median_interval = np.median(intervals)
+            mad = np.median(np.abs(intervals - median_interval))  # Median Absolute Deviation - MAD
             
             # Keep intervals within 3*MAD of median
-            valid_intervals = peak_intervals[np.abs(peak_intervals - median_interval) < 3 * mad]
+            valid_mask = np.abs(intervals - median_interval) < 2.5 * mad
+            valid_intervals = intervals[valid_mask]
             
-            if len(valid_intervals) < 2:
+            if len(valid_intervals) < 3:
                 return None, 0
             
             # Convert to heart rate
-            avg_interval = np.mean(valid_intervals)
-            heart_rate = 60 / avg_interval
+            heart_rate = 60 / np.mean(valid_intervals)
             
-            # Confidence based on interval consistency
-            interval_std = np.std(valid_intervals)
-            confidence = 1.0 / (1.0 + interval_std)  # Higher std = lower confidence
+            # Confidence based on interval consistency and peak count
+            consistency = 1.0 / (1.0 + np.std(valid_intervals))
+            peak_count_bonus = min(0.3, len(valid_intervals) / 10.0)
+            confidence = consistency + peak_count_bonus  # Higher std = lower confidence
             
-            return heart_rate, confidence
+            return heart_rate, min(1.0, confidence)
         except Exception as e:
             print(f"Peak estimation error: {e}")
             return None, 0
     
     # Autocorrelation-based heart rate estimation
-    def autocorr_heart_rate_estimation(self, signal_data):
+    def autocorr_estimation(self, signal_data):
         try:
             # Calculate autocorrelation
             autocorr = np.correlate(signal_data, signal_data, mode='full')
             autocorr = autocorr[autocorr.size // 2:]  # Keep positive lags
             
             # Convert lag to heart rate range
-            min_lag = int(self.fps * 60 / self.hr_freq_max / 60)  # Max HR lag
-            max_lag = int(self.fps * 60 / self.hr_freq_min / 60)  # Min HR lag
+            min_lag = int(self.fps * 60 / 180)  # Max HR lag
+            max_lag = int(self.fps * 60 / 50)  # Min HR lag
             
             if max_lag >= len(autocorr):
                 return None, 0
             
             # Find peak in valid range
-            search_range = autocorr[min_lag:max_lag]
-            if len(search_range) == 0:
-                return None, 0
+            search_autocorr = autocorr[min_lag:max_lag]
+
+            # Find multiple peaks and select the most prominent
+            peaks, _ = find_peaks(search_autocorr, height=np.percentile(search_autocorr, 70))
             
-            peak_lag = np.argmax(search_range) + min_lag
+            if len(peaks) == 0:
+                peak_lag = np.argmax(search_autocorr) + min_lag
+            else:
+                # Select highest peak
+                best_peak_idx = peaks[np.argmax(search_autocorr[peaks])]
+                peak_lag = best_peak_idx + min_lag
+
             heart_rate = 60 * self.fps / peak_lag # convert peak lag to BPM
             
             # Confidence based on peak prominence
             peak_value = autocorr[peak_lag]
             mean_value = np.mean(autocorr[min_lag:max_lag])
-            confidence = (peak_value - mean_value) / (np.std(autocorr[min_lag:max_lag]) + 1e-8)
-            confidence = min(1.0, max(0.0, confidence / 5.0))  # Normalize to 0-1
+            std_value = np.std(autocorr[min_lag:max_lag])
+            
+            snr = (peak_value - mean_value) / (std_value + 1e-8)
+            confidence = min(1.0, max(0.0, snr / 5.0))  # Normalize to 0-1
             
             return heart_rate, confidence
         except Exception as e:
             print(f"Autocorr estimation error: {e}")
             return None, 0
     
-    # Detailed visualization with all analysis steps
-    def visualize_results_detailed(self):
+    def welch_estimation(self, signal_data):
+        """Welch's method for spectral estimation"""
+        try:
+            from scipy import signal as sp_signal
+            
+            # Welch's method parameters
+            nperseg = min(len(signal_data) // 4, self.fps * 8)  # 8 second segments
+            
+            freqs, psd = sp_signal.welch(signal_data, fs=self.fps, nperseg=nperseg)
+            
+            # Focus on heart rate range
+            hr_mask = (freqs >= self.hr_freq_min) & (freqs <= self.hr_freq_max)
+            hr_freqs = freqs[hr_mask]
+            hr_psd = psd[hr_mask]
+            
+            if len(hr_freqs) == 0:
+                return None, 0
+            
+            # Find peak frequency
+            peak_idx = np.argmax(hr_psd)
+            peak_freq = hr_freqs[peak_idx]
+            heart_rate = peak_freq * 60
+            
+            # Confidence based on peak prominence in PSD
+            total_power = np.sum(hr_psd)
+            peak_power = hr_psd[peak_idx]
+            confidence = peak_power / total_power
+            
+            return heart_rate, confidence
+        except:
+            return None, 0
+
+    # visualization
+    def visualize_results(self):
         if len(self.rgb_signals) == 0:
             print("No signals to visualize")
             return
         
-        try:
-            rgb_array = np.array(self.rgb_signals)
-            timestamps = np.array(self.timestamps)
-            
-            # Create comprehensive plot 
-            fig, axes = plt.subplots(5, 1, figsize=(15, 20))
-            
-            # 1. Raw RGB signals
-            axes[0].plot(timestamps, rgb_array[:, 0], 'r-', label='Red', alpha=0.7)
-            axes[0].plot(timestamps, rgb_array[:, 1], 'g-', label='Green', alpha=0.7)
-            axes[0].plot(timestamps, rgb_array[:, 2], 'b-', label='Blue', alpha=0.7)
-            axes[0].set_title('Raw RGB Signals')
-            axes[0].set_xlabel('Time (seconds)')
-            axes[0].set_ylabel('Intensity')
-            axes[0].legend()
-            axes[0].grid(True, alpha=0.3)
-        
-        # 2. Processed Green signal
-            green_signal = rgb_array[:, 1]
-            processed = self.preprocess_signal(green_signal)
-            if processed is not None:
-                axes[1].plot(timestamps, green_signal, 'g-', alpha=0.5, label='Raw Green')
-                # Adjust processed signal length to match timestamps
-                if len(processed) == len(timestamps):
-                    axes[1].plot(timestamps, processed, 'darkgreen', linewidth=2, label='Preprocessed')
-                    print("DEBUG: Preprocessed signal plotted")
-                else:
-                    print(f"DEBUG: Length mismatch - processed: {len(processed)}, timestamps: {len(timestamps)}")
-            else:
-                print("DEBUG: Preprocessing returned None")
-                
-            axes[1].set_title('Signal Preprocessing')
-            axes[1].set_xlabel('Time (seconds)')
-            axes[1].set_ylabel('Amplitude')
-            axes[1].legend()
-            axes[1].grid(True, alpha=0.3)
-            print("DEBUG: Preprocessed plot completed")
-        
-        # 3. Filtered signal
-            filtered_signal = self.advanced_filter_signal(green_signal)
-            if filtered_signal is not None and len(filtered_signal) == len(timestamps):
-                axes[2].plot(timestamps, filtered_signal, 'navy', linewidth=2, label='Filtered Signal')
-                
-                # Add peaks if available
-                try:
-                    threshold = np.std(filtered_signal) * 0.3
-                    min_distance = int(self.fps * 60 / 200)
-                    peaks, _ = find_peaks(filtered_signal, height=threshold, distance=min_distance)
-                    if len(peaks) > 0:
-                        axes[2].plot(timestamps[peaks], filtered_signal[peaks], 'ro', markersize=6, label='Detected Peaks')
-                        print(f"DEBUG: Found {len(peaks)} peaks for visualization")
-                except Exception as e:
-                    print(f"DEBUG: Peak finding error: {e}")
-                    
-            axes[2].set_title('Filtered Signal with Peak Detection')
-            axes[2].set_xlabel('Time (seconds)')
-            axes[2].set_ylabel('Amplitude')
-            axes[2].legend()
-            axes[2].grid(True, alpha=0.3)
-            print("DEBUG: Filtered signal plot completed")
-            
-            # 4. FFT Spectrum
-            print("DEBUG: Computing FFT spectrum...")
-            if filtered_signal is not None:
-                try:
-                    n_samples = len(filtered_signal)
-                    fft_values = fft(filtered_signal)
-                    frequencies = fftfreq(n_samples, 1/self.fps)
-                    
-                    pos_mask = (frequencies > 0) & (frequencies < 5)
-                    plot_frequencies = frequencies[pos_mask]
-                    plot_fft_magnitude = np.abs(fft_values[pos_mask])
-                    
-                    axes[3].plot(plot_frequencies * 60, plot_fft_magnitude)
-                    axes[3].axvspan(50, 180, alpha=0.2, color='red', label='Valid HR Range')
-                    axes[3].set_title('Frequency Spectrum Analysis')
-                    axes[3].set_xlabel('Heart Rate (BPM)')
-                    axes[3].set_ylabel('FFT Magnitude')
-                    axes[3].legend()
-                    axes[3].grid(True, alpha=0.3)
-                except Exception as e:
-                    print(f"DEBUG: FFT spectrum error: {e}")
-                    traceback.print_exc()
-            
-            # 5. Heart rate estimation comparison
-            print("DEBUG: Getting heart rate estimations...")
-            hr_estimate, confidence, methods = self.heart_rate_estimation()
-            
-            if methods:
-                method_names = list(methods.keys())
-                hrs = [methods[m][0] if methods[m][0] is not None else 0 for m in method_names]
-                confs = [methods[m][1] for m in method_names]
-                
-                x_pos = np.arange(len(method_names))
-                bars = axes[4].bar(x_pos, hrs, alpha=0.7)
-                axes[4].set_xlabel('Estimation Method')
-                axes[4].set_ylabel('Heart Rate (BPM)')
-                axes[4].set_title('Heart Rate Estimation Comparison')
-                axes[4].set_xticks(x_pos)
-                axes[4].set_xticklabels(method_names)
-                
-                # Color bars by confidence
-                for i, (bar, conf) in enumerate(zip(bars, confs)):
-                    bar.set_color(plt.cm.RdYlGn(conf))
-                    axes[4].text(bar.get_x() + bar.get_width()/2., bar.get_height() + 1,
-                                f'{conf:.3f}', ha='center', va='bottom', fontsize=9)
-                
-                axes[4].grid(True, alpha=0.3)
-                print("DEBUG: HR comparison plot completed")
-            else:
-                print("DEBUG: No methods available for comparison plot")
-            
-            print("DEBUG: Finalizing plot layout...")
-            plt.tight_layout()
-            
-            print("DEBUG: Showing plot...")
-            plt.show()
-            
-            # Print detailed results
-            print(f"\n=== DEBUG Detailed Analysis Results ===")
-            if hr_estimate is not None:
-                print(f"Combined Estimate: {hr_estimate:.1f} BPM (Confidence: {confidence:.3f})")
-                print(f"\nMethod Breakdown:")
-                for method, (hr, conf) in methods.items():
-                    print(f"  {method.capitalize()}: {'{:.1f}'.format(hr) if hr else 'N/A'} BPM (conf: {conf:.3f})")
-            else:
-                print("No valid heart rate estimate obtained")
-                
-        except Exception as e:
-            print(f"DEBUG ERROR in visualize_results_detailed: {e}")
-            traceback.print_exc()
+        # Create comprehensive plot 
+        fig, axes = plt.subplots(4, 1, figsize=(15, 16))
 
-# ground truth processing from BVP signal
+        timestamps = np.array(self.timestamps)
+        signals = np.array(self.rgb_signals)
+
+        # 1. Raw CHROM signals with quality overlay
+        axes[0].plot(timestamps, signals, 'b-', alpha=0.7, label='CHROM Signal')
+        if self.signal_quality_scores:
+            quality_normalized = np.array(self.signal_quality_scores) * np.max(signals) / np.max(self.signal_quality_scores)
+            axes[0].plot(timestamps, quality_normalized, 'r--', alpha=0.5, label='Signal Quality')
+        axes[0].set_title('Raw CHROM Signal with Quality Assessment')
+        axes[0].set_xlabel('Time (seconds)')
+        axes[0].set_ylabel('Amplitude')
+        axes[0].legend()
+        axes[0].grid(True, alpha=0.3)
+        
+        # 2. Filtered signal
+        filtered_signal = self.temporal_filtering(self.rgb_signals)
+        if filtered_signal is not None:
+            filtered_timestamps = timestamps[:len(filtered_signal)]
+            axes[1].plot(filtered_timestamps, filtered_signal, 'navy', linewidth=2)
+            
+            # Add detected peaks
+            try:
+                threshold = np.std(filtered_signal) * 0.3
+                min_distance = int(self.fps * 60 / 200)
+                peaks, _ = find_peaks(filtered_signal, height=threshold, distance=min_distance)
+                if len(peaks) > 0:
+                    axes[1].plot(filtered_timestamps[peaks], filtered_signal[peaks], 
+                               'ro', markersize=6, label=f'{len(peaks)} Peaks')
+            except:
+                pass
+        
+        axes[1].set_title('Filtered Signal with Peak Detection')
+        axes[1].set_xlabel('Time (seconds)')
+        axes[1].set_ylabel('Amplitude')
+        axes[1].legend()
+        axes[1].grid(True, alpha=0.3)
+        
+        # 3. Frequency spectrum (FFT + Welch)
+        if filtered_signal is not None:
+            # FFT
+            n_samples = len(filtered_signal)
+            fft_values = np.abs(fft(filtered_signal))
+            frequencies = fftfreq(n_samples, 1/self.fps)
+            
+            pos_mask = (frequencies > 0) & (frequencies < 5)
+            axes[2].plot(frequencies[pos_mask] * 60, fft_values[pos_mask], 
+                        'b-', alpha=0.7, label='FFT')
+            
+            # Welch PSD
+            try:
+                from scipy import signal as sp_signal
+                freqs, psd = sp_signal.welch(filtered_signal, fs=self.fps)
+                welch_mask = (freqs > 0) & (freqs < 5)
+                axes[2].plot(freqs[welch_mask] * 60, psd[welch_mask], 
+                           'r-', alpha=0.7, label='Welch PSD')
+            except:
+                pass
+            
+            axes[2].axvspan(50, 180, alpha=0.2, color='green', label='Valid HR Range')
+        
+        axes[2].set_title('Frequency Domain Analysis')
+        axes[2].set_xlabel('Heart Rate (BPM)')
+        axes[2].set_ylabel('Power')
+        axes[2].legend()
+        axes[2].grid(True, alpha=0.3)
+            
+            # 4. Method comparison
+        hr_estimate, confidence, methods = self.heart_rate_estimation()
+        
+        if methods:
+            method_names = list(methods.keys())
+            hrs = [methods[m][0] if methods[m][0] is not None else 0 for m in method_names]
+            confs = [methods[m][1] for m in method_names]
+            
+            bars = axes[3].bar(method_names, hrs, alpha=0.7)
+            for i, (bar, conf) in enumerate(zip(bars, confs)):
+                color_intensity = min(1.0, max(0.0, conf))
+                bar.set_color(plt.cm.RdYlGn(color_intensity))
+                axes[3].text(bar.get_x() + bar.get_width()/2., bar.get_height() + 2,
+                           f'{conf:.2f}', ha='center', va='bottom', fontsize=9)
+        
+        axes[3].set_title('Heart Rate Estimation Methods Comparison')
+        axes[3].set_xlabel('Method')
+        axes[3].set_ylabel('Heart Rate (BPM)')
+        axes[3].grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.show()
+            
+        # Print results
+        print(f"\n=== Phase 2 Analysis Results ===")
+        if hr_estimate is not None:
+            print(f"Final Estimate: {hr_estimate:.1f} BPM (Confidence: {confidence:.3f})")
+            print(f"Signal Quality: Avg = {np.mean(self.signal_quality_scores):.2f}")
+            print(f"Method Breakdown:")
+            for method, (hr, conf) in methods.items():
+                status = "✓" if hr is not None and conf > 0.3 else "✗"
+                hr_str = f"{hr:.1f}" if hr is not None else "N/A"
+                print(f"  {status} {method.capitalize()}: {hr_str} BPM (conf: {conf:.3f})")
+        else:
+            print("No reliable heart rate estimate obtained")
+
+# ground truth processing from BVP signal (file format: 3 lines - BVP values, HR values, timestamps)
 def ground_truth_processing(gt_path, fps=30):
     try:
         # Read the BVP signal
         with open(gt_path, 'r') as f:
             lines = f.readlines()
         
-        # Parse BVP values (assuming one value per line)
-        bvp_values = []
-        for line in lines:
-            line = line.strip()
-            if line and not line.startswith('#'):  # Skip empty lines and comments
-                try:
-                    # Handle both space-separated and single values
-                    values = line.split()
-                    if len(values) >= 1:
-                        bvp_values.append(float(values[0]))
-                except ValueError:
-                    continue
-        
-        if len(bvp_values) == 0:
-            print("No valid BVP values found in ground truth file")
+        if len(lines) < 2:
+            print("Ground truth file has insufficient data")
             return None
         
-        # convert list to numpy array
-        bvp_signal = np.array(bvp_values)
-        
-        # Estimate HR from BVP signal using multiple methods
-        # Method 1: Peak-based analysis
-        hr_peak = estimate_hr_from_bvp_peaks(bvp_signal, fps)
-        
-        # Method 2: FFT-based analysis
-        hr_fft = estimate_hr_from_bvp_fft(bvp_signal, fps)
-        
-        # Method 3: Sliding window analysis
-        hr_window = estimate_hr_from_bvp_sliding(bvp_signal, fps)
-        
-        # Combine estimates
-        valid_estimates = [hr for hr in [hr_peak, hr_fft, hr_window] if hr is not None and 50 <= hr <= 180]
-        
-        if valid_estimates:
-            avg_hr = np.mean(valid_estimates)
-            print(f"Ground truth HR estimates: Peak={hr_peak:.1f}, FFT={hr_fft:.1f}, Window={hr_window:.1f}")
-            print(f"Average ground truth HR: {avg_hr:.1f} BPM")
-            return avg_hr
-        else:
-            print("Could not extract reliable HR from ground truth BVP signal")
-            return None
+        # Try to parse as UBFC format (3 lines: BVP, HR, timestamps)
+        try:
+            # Second line contains HR values
+            hr_line = lines[1].strip()
+            hr_values = [float(x) for x in hr_line.split()]
             
+            if len(hr_values) > 0:
+                # Use median HR as ground truth (more stable than mean)
+                gt_hr = np.median(hr_values)
+                if 50 <= gt_hr <= 180:
+                    print(f"Ground truth HR (from file): {gt_hr:.1f} BPM")
+                    return gt_hr
+        except (ValueError, IndexError):
+            pass
+        
+        # Fallback: try to extract from BVP signal (first line)
+        try:
+            bvp_line = lines[0].strip()
+            bvp_values = [float(x) for x in bvp_line.split()]
+            
+            if len(bvp_values) < fps * 5:  # Need at least 5 seconds
+                print(f"BVP signal too short: {len(bvp_values)} samples")
+                return None
+            
+            bvp_signal = np.array(bvp_values)
+            print(f"Processing BVP signal: {len(bvp_signal)} samples")
+            
+            # Use multiple estimation methods
+            hr_peak = estimate_hr_from_bvp_peaks(bvp_signal, fps)
+            hr_fft = estimate_hr_from_bvp_fft(bvp_signal, fps)
+            hr_window = estimate_hr_from_bvp_sliding(bvp_signal, fps)
+            
+            print(f"BVP HR estimates: Peak={hr_peak}, FFT={hr_fft}, Window={hr_window}")
+            
+            # Combine valid estimates
+            valid_estimates = [hr for hr in [hr_peak, hr_fft, hr_window] 
+                             if hr is not None and 50 <= hr <= 180]
+            
+            if valid_estimates:
+                avg_hr = np.mean(valid_estimates)
+                print(f"Ground truth HR (from BVP): {avg_hr:.1f} BPM")
+                return avg_hr
+                
+        except (ValueError, IndexError):
+            pass
+        
+        print("Could not extract reliable HR from ground truth file")
+        return None
+        
     except Exception as e:
         print(f"Error processing ground truth: {e}")
         return None
@@ -627,7 +744,7 @@ def estimate_hr_from_bvp_peaks(bvp_signal, fps=30):
     except Exception as e:
         print(f"HR from BVP, peaks estimation error: {e}")
         return None
-
+    
 # Estimate HR from BVP using FFT
 def estimate_hr_from_bvp_fft(bvp_signal, fps=30):
     try:
@@ -658,37 +775,61 @@ def estimate_hr_from_bvp_fft(bvp_signal, fps=30):
         print(f"HR from BVP, FFT estimation error: {e}")
         return None
 
-# Estimate HR using sliding window approach
+# Estimate HR using sliding window approach with error handling 
 def estimate_hr_from_bvp_sliding(bvp_signal, fps=30, window_sec=10):
     try:
         window_size = int(window_sec * fps)
         if len(bvp_signal) < window_size:
+            print(f"Sliding window: Signal too short ({len(bvp_signal)} < {window_size})")
             return None
         
         hr_estimates = []
+        step_size = max(1, window_size // 4)  # 25% overlap
         
-        for i in range(0, len(bvp_signal) - window_size, window_size // 2):
+        for i in range(0, len(bvp_signal) - window_size + 1, step_size):
             window = bvp_signal[i:i + window_size]
             
             # Quick FFT-based estimation for this window
-            window_detrended = detrend(window)
-            fft_vals = fft(window_detrended)
-            freqs = fftfreq(len(window), 1/fps)
-            
-            hr_mask = (freqs >= 0.83) & (freqs <= 3.0)
-            if np.any(hr_mask):
+            try:
+                window_detrended = detrend(window)
+                
+                # Check for valid signal
+                if np.std(window_detrended) < 1e-8:
+                    continue
+                
+                fft_vals = fft(window_detrended)
+                freqs = fftfreq(len(window), 1/fps)
+                
+                hr_mask = (freqs >= 0.83) & (freqs <= 3.0)
+                if not np.any(hr_mask):
+                    continue
+                    
                 hr_freqs = freqs[hr_mask]
                 hr_mags = np.abs(fft_vals[hr_mask])
+                
+                if len(hr_mags) == 0:
+                    continue
+                    
                 peak_freq = hr_freqs[np.argmax(hr_mags)]
                 hr = peak_freq * 60
+                
                 if 50 <= hr <= 180:
                     hr_estimates.append(hr) # add valid estimate to list
         
-        if len(hr_estimates) >= 3:
+            except Exception:
+                continue
+
+        if len(hr_estimates) >= 2:
+            # Use median for robustness
             return np.median(hr_estimates)
-        return None
+        elif len(hr_estimates) == 1:
+            return hr_estimates[0]
+        else:
+            print("Sliding window: No valid estimates")
+            return None
+            
     except Exception as e:
-        print(f"HR from BVP, sliding window estimation error: {e}")
+        print(f"Sliding window error: {e}")
         return None
 
 class UBFCDatasetLoader:
@@ -735,10 +876,8 @@ def demo_rppg():
 
     dataset_path = "C:/Users/cemre/Desktop/vitalight/ubfc_2" 
     
-    # Check if dataset exists
     if not Path(dataset_path).exists():
         print(f"Dataset not found at: {dataset_path}")
-        print("Please update the dataset_path variable with your local UBFC-2 dataset path")
         return
     
     try:
@@ -764,47 +903,73 @@ def demo_rppg():
         success = processor.process_video(subject_info['video_path'])
         
         if success:
-            # Detailed visualization
-            print("\n--- Generating Detailed Analysis ---")
-            processor.visualize_results_detailed()
-            
             # Get heart rate estimation
             hr_estimate, confidence, methods = processor.heart_rate_estimation()
             
             # Process ground truth
             print("\n--- Processing Ground Truth ---")
             gt_hr = ground_truth_processing(subject_info['ground_truth_path'])
-
+            
+            # Store result
+            result = {
+                'subject': subject_info['subject_id'],
+                'estimated_hr': hr_estimate,
+                'confidence': confidence,
+                'ground_truth_hr': gt_hr,
+                'methods': methods
+            }
+            
+            # Show detailed visualization
+            print("\n--- Generating Detailed Analysis ---")
+            processor.visualize_results()
+            
             # Final comparison
             print(f"\n=== FINAL RESULTS ===")
             print(f"Estimated HR: {hr_estimate:.1f} BPM (Confidence: {confidence:.3f})")
-            
-            if gt_hr is not None:
+
+            if gt_hr:
                 error = abs(hr_estimate - gt_hr)
-                relative_error = error / gt_hr * 100
-                
+                rel_error = error / gt_hr * 100
                 print(f"Ground Truth HR: {gt_hr:.1f} BPM")
                 print(f"Absolute Error: {error:.1f} BPM")
-                print(f"Relative Error: {relative_error:.1f}%")
+                print(f"Relative Error: {rel_error:.1f}%")
                 
                 # Quality assessment
-                if relative_error < 10:
+                if rel_error < 10:
                     print("✓ Excellent accuracy!")
-                elif relative_error < 20:
+                elif rel_error < 20:
                     print("✓ Good accuracy")
-                elif relative_error < 30:
+                elif rel_error < 30:
                     print("⚠ Moderate accuracy")
                 else:
                     print("✗ Poor accuracy - needs improvement")
             else:
                 print("Could not process ground truth for comparison")
-                
+
             # Method breakdown
             print(f"\n--- Method Breakdown ---")
             for method, (hr, conf) in methods.items():
                 status = "✓" if hr is not None and conf > 0.2 else "✗"
                 hr_str = f"{hr:.1f}" if hr is not None else "N/A"
                 print(f"{status} {method.capitalize()}: {hr_str} BPM (conf: {conf:.3f})")
+            
+            # Performance summary for this single subject
+            if gt_hr is not None and hr_estimate is not None:
+                print(f"\n=== Single Subject Performance ===")
+                print(f"Subject: {subject_info['subject_id']}")
+                print(f"Absolute error: {error:.1f} BPM")
+                print(f"Relative error: {rel_error:.1f}%")
+                print(f"Confidence: {confidence:.3f}")
+                print(f"Accuracy (±10 BPM): {'✓' if error <= 10 else '✗'}")
+                print(f"Accuracy (±15 BPM): {'✓' if error <= 15 else '✗'}")
+                
+                # Individual method performance
+                print(f"\n--- Individual Method Performance ---")
+                for method, (hr, conf) in methods.items():
+                    if hr is not None:
+                        method_error = abs(hr - gt_hr)
+                        method_rel_error = method_error / gt_hr * 100
+                        print(f"{method.capitalize()}: {method_error:.1f} BPM error ({method_rel_error:.1f}%), conf: {conf:.3f}")
         
         else:
             print("Failed to process video")

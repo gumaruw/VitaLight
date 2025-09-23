@@ -7,6 +7,7 @@ A system that detects heart rate from facial video using subtle color changes in
 # VitaLight Flowchart
 
 ```mermaid
+%%{init: {"themeVariables": { "fontSize": "10px", "nodeSpacing": 20, "rankSpacing": 20 }}}%%
 flowchart TD
     A[Video Input] --> B[Face Detection - OpenCV / MediaPipe]
     B --> C[ROI Selection - Forehead, Cheeks]
@@ -73,17 +74,12 @@ flowchart TD
 - ✅ Advanced filtering (detrending, normalization)
 - ✅ Multiple estimation methods (FFT, peaks, autocorrelation)
 - ✅ Confidence-weighted combination
-- ✅ Better ground truth processing
 - ✅ Comprehensive visualization
 - ✅ Robust error handling
-
-_Current status: actively working here._
 
 ---
 
 ### Phase 2: Advanced Signal Processing
-
-**Duration:** 2-3 weeks
 
 **Goals:**
 
@@ -99,13 +95,27 @@ _Current status: actively working here._
 - **Signal Quality Assessment**: Detect and handle poor quality signals
 - **Temporal Consistency**: Smooth heart rate estimates over time
 
-**Expected Output:** 75–85% accuracy
+**Results:**
+
+- Added CHROM method and multi-ROI processing
+- Implemented ICA-based signal separation
+- Advanced temporal filtering: moving average + bandpass + normalization
+- Introduced new Welch method for HR estimation
+- Signal quality assessment integrated into pipeline
+- Method comparison framework extended
+- Ground truth parsing fixed:
+  - UBFC format error fixed (3 lines: BVP, HR, timestamps)
+  - Direct HR reading from second line
+  - Fallback to BVP-derived HR if missing
+  - Better error messages for debugging
+- Fixed filtfilt "padlen" error on short signals
+- Improved accuracy vs. ground truth (95.3 BPM est. vs 102.0 BPM true, 6.5% error)
 
 ---
 
 ### Phase 3: Machine Learning Enhancement
 
-**Duration:** 2-3 weeks
+_Current status: actively working here._
 
 **Goals:**
 
@@ -124,13 +134,9 @@ _Current status: actively working here._
 - **Model Training on Kaggle**: Leverage free GPU
 - **Model Optimization**: Quantization, pruning for deployment
 
-**Expected Output:** ~90%+ accuracy
-
 ---
 
 ### Phase 4: Real-time Implementation & Web App
-
-**Duration:** 1-2 weeks
 
 **Goals:**
 
@@ -145,18 +151,3 @@ _Current status: actively working here._
 - **Model Integration**: Seamless local model loading
 - **Visualization**: Real-time plots and heart rate history
 - **Error Handling**: Robust error management and user feedback
-
----
-
-## VS Code Setup Instructions
-
-1. **Create Python environment:**
-
-````bash
-conda create -n rppg python=3.11
-conda activate rppg
-
-2. **Install dependencies:**
-```bash
-pip install -r requirements.txt
-````
