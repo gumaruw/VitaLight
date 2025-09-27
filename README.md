@@ -87,12 +87,12 @@ flowchart TD
 
 ### Iteration 1.5: Improvements
 
-- ✅ Multi-ROI signal extraction
-- ✅ Advanced filtering (detrending, normalization)
-- ✅ Multiple estimation methods (FFT, peaks, autocorrelation)
-- ✅ Confidence-weighted combination
-- ✅ Comprehensive visualization
-- ✅ Robust error handling
+- Multi-ROI signal extraction
+- Advanced filtering (detrending, normalization)
+- Multiple estimation methods (FFT, peaks, autocorrelation)
+- Confidence-weighted combination
+- Comprehensive visualization
+- Robust error handling
 
 **Results:**
 
