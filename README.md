@@ -65,8 +65,10 @@ flowchart TD
 - Convert RGB values to time series
 - Estimate HR using FFT
 
-**Results:**
-
+**Results:**    
+    
+<img width="1536" height="802" alt="phase1_results" src="https://github.com/user-attachments/assets/ad9f018f-0ff1-40f1-974a-90e8cc58148b" />    
+    
 - Worked initially on Kaggle; resolved attribute errors.
 - Adjusted code to handle missing `hr` in `ground_truth.txt`.
 - Early results were poor:
@@ -128,7 +130,11 @@ flowchart TD
 - Signal Quality Assessment to reject noisy data
 - Temporal Consistency for smoothed HR estimates
 
-**Results:**
+**Results:**        
+        
+<img width="1536" height="802" alt="phase_2_results" src="https://github.com/user-attachments/assets/0c278dbe-f966-4d55-9972-a8ca3bab79ca" />        
+    
+<img width="1602" height="895" alt="Ekran görüntüsü 2025-09-27 140028" src="https://github.com/user-attachments/assets/cac53504-3c00-4fbb-b39b-271061cd5bb5" />
 
 - Added CHROM method and multi-ROI processing
 - Implemented ICA-based signal separation
@@ -143,6 +149,7 @@ flowchart TD
   - Better error messages for debugging
 - Fixed filtfilt "padlen" error on short signals
 - Improved accuracy vs. ground truth (95.3 BPM est. vs 102.0 BPM true, 6.5% error)
+
 
 **Evaluation:**
 
