@@ -1,236 +1,65 @@
-# Vitalight - rPPG Heart Rate Detection
+# VitaLight — rPPG Heart Rate Detection
 
-A system that detects heart rate from facial video using subtle color changes in skin caused by blood circulation.
+A Python tool that estimates heart rate from facial video by analyzing subtle, pulse-driven color changes in the skin (remote photoplethysmography — rPPG).
 
----
+## Overview
 
-This project is structured according to the Spiral Model. Each iteration (cycle) consists of four stages:
+Given a video of a person's face, VitaLight extracts a physiological signal from skin color changes and estimates heart rate (BPM) without any physical sensor contact. It was developed and validated against the [UBFC-rPPG](https://sites.google.com/view/ybenezeth/ubfcrppg) dataset, comparing estimated heart rate against each subject's recorded ground truth.
 
-1. Planning → Define objectives
-2. Risk Analysis / Research → Identify uncertainties
-3. Development / Prototyping → Implement and experiment
-4. Evaluation → Analyze outcomes
+## How It Works
 
-After evaluation, the next cycle begins.
+1. **Face detection** — Haar Cascade classifier (OpenCV) locates the face in each frame.
+2. **ROI selection** — Three regions are extracted per frame: forehead, left cheek, right cheek.
+3. **Signal quality assessment** — Each ROI is scored on brightness, contrast, and size; low-quality regions are down-weighted or discarded.
+4. **Signal extraction (CHROM)** — RGB values from the ROIs are combined (quality-weighted) and transformed using the CHROM algorithm, which is more robust to illumination changes than raw RGB signals.
+5. **Temporal filtering** — Detrending, moving-average smoothing, and a Butterworth bandpass filter (restricted to the 50–180 BPM frequency range) clean the signal.
+6. **ICA refinement** — When multiple ROI channels are available, Independent Component Analysis (`scikit-learn`'s FastICA) is used to help separate the pulse signal from noise.
+7. **Heart rate estimation** — Four independent methods (FFT peak, time-domain peak detection, autocorrelation, Welch power spectral density) each produce a BPM estimate with a confidence score; the final result is a confidence-weighted average.
+8. **Ground truth comparison** — For UBFC subjects, the tool parses `ground_truth.txt` and reports absolute/relative error against the estimate.
 
----
+## Tech Stack
 
-# VitaLight Flowchart
+- **OpenCV** — video I/O, Haar Cascade face detection
+- **NumPy / SciPy** — signal processing (FFT, Butterworth filtering, Welch PSD, peak detection)
+- **scikit-learn** — ICA (FastICA) for signal separation
+- **Matplotlib** — visualization of raw/filtered signals, frequency spectrum, and per-method comparison
+- **pandas / Pillow** — supporting utilities
 
-```mermaid
-%%{init: {"themeVariables": { "fontSize": "10px", "nodeSpacing": 20, "rankSpacing": 20 }}}%%
-flowchart TD
-    A[Video Input] --> B[Face Detection - OpenCV / MediaPipe]
-    B --> C[ROI Selection - Forehead, Cheeks]
-    C --> D[Signal Extraction - RGB Time Series]
-    D --> E[Signal Processing - Filtering, Detrending]
-    E --> F[Heart Rate Estimation - FFT, Peaks, Autocorrelation]
-    F --> G[Output: Heart Rate BPM + Visualization]
+## Setup
+
+```bash
+pip install -r requirements.txt
 ```
 
----
+Requires a local copy of the UBFC-rPPG dataset, structured as `subjectXX/vid.avi` + `subjectXX/ground_truth.txt`.
 
-## Core Pipeline
+## Usage
 
-1. **Face Detection** → Extract face region from video frames
-2. **ROI Selection** → Select skin regions (forehead, cheeks)
-3. **Signal Extraction** → Extract RGB time series from selected regions
-4. **Signal Processing** → Apply filtering and noise reduction
-5. **Heart Rate Estimation** → Use spectral analysis to find heart rate
+The `demo_rppg()` entry point currently points to a hardcoded local dataset path and is meant to be run as a script during development, not as a packaged CLI tool:
 
----
+```bash
+python vitalight.py
+```
 
-## Core Libraries
+Update the `dataset_path` variable in `demo_rppg()` to point to your local UBFC-rPPG directory before running.
 
-- **OpenCV**: Video processing, face detection
-- **MediaPipe**: Advanced face landmarks detection
-- **NumPy**: Numerical computations
-- **SciPy**: Signal processing (filters, FFT)
-- **Scikit-learn**: ICA decomposition
-- **Matplotlib**: Visualization and debugging
-- **TensorFlow/Keras**: For potential deep learning models
-- **Streamlit**: For web app deployment
+## Current Status
 
----
+The project reached its original objective: extracting a usable heart-rate estimate from facial video via rPPG, with a working multi-method (FFT/peak/autocorrelation/Welch), quality-weighted, ICA-assisted pipeline, and a ground-truth comparison process against the UBFC dataset. Development proceeded iteratively (a face-detection + single-ROI baseline, then multi-ROI + CHROM + ICA), with relative error against ground truth dropping from ~195% to ~6.5% across iterations.
 
-## Project Iterations
+This is not a packaged or deployed application — it's a single-script research/experimentation tool. No web interface, real-time processing, or ML-based extensions have been built. Development has been paused at this point; no further extensions are currently planned.
 
-### Iteration 1: Initial Implementation
+For the full iteration-by-iteration development history — including intermediate results, what changed at each step, and ideas that were explored but not implemented — see [DEVELOPMENT_LOG.md](./DEVELOPMENT_LOG.md).
 
-**Planning**
+## Known Limitations
 
-- Explore UBFC-2 dataset format
-- Implement face detection with OpenCV
-- Extract signals from the forehead region
-- Convert RGB values to time series
-- Estimate HR using FFT
+- No automated tests
+- Hardcoded local file path in the demo entry point (not portable out of the box)
+- Single-file structure — no separation between library code and the demo script
+- Face detection relies on Haar Cascade, which is less robust to pose/lighting variation than landmark-based detectors
+- Accuracy has only been validated against the UBFC-rPPG dataset
 
-**Results:**    
-    
-<img width="1536" height="802" alt="phase1_results" src="https://github.com/user-attachments/assets/ad9f018f-0ff1-40f1-974a-90e8cc58148b" />    
-    
-- Worked initially on Kaggle; resolved attribute errors.
-- Adjusted code to handle missing `hr` in `ground_truth.txt`.
-- Early results were poor:
-  - Estimated Heart Rate: 107.1 BPM
-  - Confidence: 0.015
-  - Comparison with Ground Truth:
-  - Average Ground Truth HR: 36.4 BPM
-  - Estimated HR: 107.1 BPM
-  - Error: 70.8 BPM
-  - Relative Error: 194.7%
+## Lessons Learned
 
-**Evaluation:**
-
-- Large errors (194% relative error). Decided to refine preprocessing and ROI strategy.
-- Decided to switch to VS Code for development.
-
----
-
-### Iteration 1.5: Improvements
-
-- Multi-ROI signal extraction
-- Advanced filtering (detrending, normalization)
-- Multiple estimation methods (FFT, peaks, autocorrelation)
-- Confidence-weighted combination
-- Comprehensive visualization
-- Robust error handling
-
-**Results:**
-
-- Combined Estimate: 103.3 BPM (Confidence: 0.584)
-- Method Breakdown:
-  - FFT → 89.0 BPM (Confidence: 0.021, unreliable)
-  - Peaks → 112.4 BPM (Confidence: 0.855, most stable)
-  - Autocorrelation → 78.3 BPM (Confidence: 0.313, partially consistent)
-- Ground truth BVP signal could not be reliably parsed → no direct error comparison available
-
-**Evaluation:**
-
-- Accuracy could not be quantified due to missing ground truth processing
-- More stable results, but overall accuracy remained limited.
-- Confidence-weighted fusion improved stability compared to individual methods
-- Next step: refine signal quality assessment and integrate more advanced algorithms (e.g., CHROM)
-
----
-
-### Iteration 2: Advanced Signal Processing
-
-**Planning:**
-
-- Integrate CHROM algorithm
-- Improve filtering and temporal stability
-- Reduce error margin to acceptable levels
-
-**Key Components:**
-
-- CHROM Algorithm for robust signal construction
-- Adaptive Filtering: bandpass, detrending, moving average
-- Multi-ROI Processing for signal fusion
-- Signal Quality Assessment to reject noisy data
-- Temporal Consistency for smoothed HR estimates
-
-**Results:**        
-        
-<img width="1536" height="802" alt="phase_2_results" src="https://github.com/user-attachments/assets/0c278dbe-f966-4d55-9972-a8ca3bab79ca" />        
-    
-<img width="1602" height="895" alt="Ekran görüntüsü 2025-09-27 140028" src="https://github.com/user-attachments/assets/cac53504-3c00-4fbb-b39b-271061cd5bb5" />
-
-- Added CHROM method and multi-ROI processing
-- Implemented ICA-based signal separation
-- Advanced temporal filtering: moving average + bandpass + normalization
-- Introduced new Welch method for HR estimation
-- Signal quality assessment integrated into pipeline
-- Method comparison framework extended
-- Ground truth parsing fixed:
-  - UBFC format error fixed (3 lines: BVP, HR, timestamps)
-  - Direct HR reading from second line
-  - Fallback to BVP-derived HR if missing
-  - Better error messages for debugging
-- Fixed filtfilt "padlen" error on short signals
-- Improved accuracy vs. ground truth (95.3 BPM est. vs 102.0 BPM true, 6.5% error)
-
-
-**Evaluation:**
-
-- Accuracy significantly improved (error reduced to ~6.5%).
-- Based on my literature review, I decided to experiment with the POS algorithm.
-  - The paper “Effectiveness of Remote PPG Construction Methods: A Preliminary Analysis” compares eight rPPG methods (POS, LGI, CHROM, OMIT, GREEN, ICA, PCA, PBV).
-  - Results show that POS demonstrates superior robustness in challenging conditions (motion and natural light), particularly for heart rate estimation.
-- Next step: implement hybrid approaches, combining GREEN, CHROM, and POS for enhanced stability and accuracy.
-
----
-
-### Iteration 3: Hybrid Methods & Optimization
-
-_Current status: actively working here._
-
-**Planning:**
-
-- Combine multiple methods (POS, CHROM, GREEN) for robustness
-- Optimize preprocessing and temporal stability
-- Benchmark hybrid pipeline vs. individual algorithms
-
-**Key Components:**
-
-- Hybrid Algorithm Design: weighted combination of POS, CHROM, GREEN
-- Dynamic Method Selection: switch algorithms based on signal quality
-- Performance Benchmarking: cross-dataset evaluation
-
-**Results:**
-
-- **Evaluation:**
-
-- ***
-
-### Iteration 4: Machine Learning Enhancement
-
-**Planning:**
-
-- Integrate deep learning for generalization and temporal modeling
-- Aim for research-grade accuracy
-
-**Key Components:**
-
-- **Data Collection**: UBFC-rPPG, PURE, etc.
-- **Feature Engineering**: Frequency domain and statistical features
-- **Deep Learning Models**:
-  - CNN for ROI selection optimization
-  - LSTM/GRU for temporal modeling
-  - Attention mechanisms for adaptive region weighting
-- **Model Training on Kaggle**: Leverage free GPU
-- **Model Optimization**: Quantization, pruning for deployment
-
-**Results:**
-
-- **Evaluation:**
-
-- ***
-
-### Iteration 5: Real-time Implementation & Web App
-
-**Planning:**
-
-- Transition from research to real-time application
-- Design a web-based and mobile-ready solution
-
-**Key Components:**
-
-- **Real-time Optimization**: Frame skipping, efficient processing
-- **Streamlit Web App**: Clean, intuitive interface
-- **Model Integration**: Seamless local model loading
-- **Visualization**: Real-time plots and heart rate history
-- **Error Handling**: Robust error management and user feedback
-
-**Results:**
-
-- **Evaluation:**
-
-- ***
-
-  **Summary:**
-
-- The Spiral Model is well-suited for this project due to its risk-driven and research-oriented nature.
-- Each iteration refines the system, balancing exploration (research) and consolidation (implementation).
-- The project goal remains constant: Develop a system that extracts signals from facial video and reliably estimates heart rate.
-- Methods, filters, and models evolve through iterative experimentation.
+- Naive single-ROI RGB extraction with FFT alone produced highly unreliable estimates; robustness improved substantially once multi-ROI signal fusion, the CHROM transform, and confidence-weighted combination of multiple estimation methods (FFT, peak, autocorrelation, Welch) were introduced together.
+- Ground truth files in the UBFC dataset needed careful format handling (BVP signal, HR values, and timestamps on separate lines) — a naive single-line parser silently produced wrong values.
